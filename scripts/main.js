@@ -4,11 +4,13 @@ class JournalHistory {
     static isNavigating = false;
 
     static init() {
-        console.log("Quick Journal Page Back (v12) | Initializing");
-        // Wrap the core V12 goToPage function to catch internal journal page clicks
+        // Wrap the core V12 goToPage function to catch internal journal page clicks.
+        // Core's goToPage is synchronous (returns Application|JournalSheet|undefined).
+        // Keep the same synchronous contract so we don't break other code that
+        // relies on the return value being available immediately.
         const originalGoToPage = JournalSheet.prototype.goToPage;
-        JournalSheet.prototype.goToPage = async function(pageId, options) {
-            const result = await originalGoToPage.apply(this, [pageId, options]);
+        JournalSheet.prototype.goToPage = function (pageId, options) {
+            const result = originalGoToPage.call(this, pageId, options);
             const page = this.object.pages.get(pageId);
             if (page && !JournalHistory.isNavigating) {
                 JournalHistory.addPage(page.uuid);
@@ -20,19 +22,16 @@ class JournalHistory {
 
     static addPage(uuid) {
         if (this.isNavigating) return;
-        
-        // If adding a new page while somewhere in the middle of the history stack, truncate forward history
+
         if (this.index < this.history.length - 1) {
             this.history = this.history.slice(0, this.index + 1);
         }
 
-        // Prevent duplicate consecutive entries (e.g. from window resizing)
         if (this.history[this.index] === uuid) return;
 
         this.history.push(uuid);
         this.index++;
-        
-        // Memory cap: Limit history size to the last 50 pages
+
         if (this.history.length > 50) {
             this.history.shift();
             this.index--;
@@ -45,6 +44,7 @@ class JournalHistory {
             this.index--;
             await this.openDocument(this.history[this.index], app);
             this.isNavigating = false;
+            this.updateAllButtons();
         }
     }
 
@@ -54,11 +54,11 @@ class JournalHistory {
             this.index++;
             await this.openDocument(this.history[this.index], app);
             this.isNavigating = false;
+            this.updateAllButtons();
         }
     }
 
     static async openDocument(uuid, currentApp) {
-        // v12 asynchronous document fetch
         const doc = await fromUuid(uuid);
         if (!doc) {
             ui.notifications.warn("Linked journal page no longer exists.");
@@ -66,83 +66,120 @@ class JournalHistory {
         }
 
         if (doc instanceof JournalEntryPage) {
-            // Internal Navigation: If the same journal is already open
             if (currentApp && currentApp.object === doc.parent) {
-                await currentApp.goToPage(doc.id);
+                currentApp.goToPage(doc.id);
             } else {
-                // External Navigation: Render the target journal targeting the specific pageId
                 doc.parent.sheet.render(true, { pageId: doc.id });
             }
         } else if (doc instanceof JournalEntry) {
             doc.sheet.render(true);
         }
-        
+
         this.updateAllButtons();
     }
 
-    static injectButtons(app, html) {
-        const $html = $(html);
-        if ($html.find('.journal-history-controls').length) return;
-
-        // Target the standard V12 journal header 
-        const headerControls = $html.find('.journal-header .journal-header-controls');
-        if (!headerControls.length) return;
-
-        const controlsHtml = `
-            <div class="journal-history-controls">
-                <button type="button" class="history-btn back" title="Go Back">
-                    <i class="fas fa-arrow-left"></i>
-                </button>
-                <button type="button" class="history-btn forward" title="Go Forward">
-                    <i class="fas fa-arrow-right"></i>
-                </button>
-            </div>
-        `;
-        
-        const controls = $(controlsHtml);
-        controls.find('.back').click((e) => {
-            e.preventDefault();
-            this.goBack(app);
-        });
-        controls.find('.forward').click((e) => {
-            e.preventDefault();
-            this.goForward(app);
-        });
-
-        headerControls.prepend(controls);
-        this.updateButtons($html);
+    /**
+     * Preferred path: add Back/Forward entries via Foundry's documented
+     * header-button hook. See:
+     * https://foundryvtt.com/api/v12/functions/hookEvents.getApplicationHeaderButtons.html
+     */
+    static addHeaderButtons(app, buttons) {
+        buttons.unshift(
+            {
+                label: "",
+                class: "history-back",
+                icon: "fas fa-arrow-left",
+                onclick: () => JournalHistory.goBack(app)
+            },
+            {
+                label: "",
+                class: "history-forward",
+                icon: "fas fa-arrow-right",
+                onclick: () => JournalHistory.goForward(app)
+            }
+        );
     }
 
-    static updateButtons($html) {
-        if (!$html) return;
-        const backBtn = $html.find('.journal-history-controls .back');
-        const fwdBtn = $html.find('.journal-history-controls .forward');
-        
-        backBtn.prop('disabled', this.index <= 0);
-        fwdBtn.prop('disabled', this.index >= this.history.length - 1);
+    /**
+     * Fallback path: if for any reason the buttons above did not make it into
+     * the rendered header (blocked by another module, hook not firing on this
+     * install, etc.), inject matching <a class="header-button"> elements
+     * directly into .window-header, which is the one piece of DOM structure
+     * that has been stable across Foundry versions for every popped-out
+     * Application window.
+     */
+    static ensureFallbackButtons(app) {
+        const $app = app.element;
+        if (!$app || !$app.length) return;
+
+        const $header = $app.find('.window-header').first();
+        if (!$header.length) {
+            console.warn("Quick Journal Page Back (v12) | .window-header not found on", app.id);
+            return;
+        }
+
+        if ($header.find('.header-button.history-back').length) return; // already present
+
+        const $back = $(
+            '<a class="header-button control history-back"><i class="fas fa-arrow-left"></i></a>'
+        ).on('click', (e) => {
+            e.preventDefault();
+            JournalHistory.goBack(app);
+        });
+
+        const $forward = $(
+            '<a class="header-button control history-forward"><i class="fas fa-arrow-right"></i></a>'
+        ).on('click', (e) => {
+            e.preventDefault();
+            JournalHistory.goForward(app);
+        });
+
+        // Put them right before the close button if present, otherwise at the end.
+        const $close = $header.find('.header-button.close, a.close').first();
+        if ($close.length) {
+            $close.before($back, $forward);
+        } else {
+            $header.append($back, $forward);
+        }
     }
-    
+
+    static updateButtons(app) {
+        const $app = app && app.element;
+        if (!$app || !$app.length) return;
+
+        const backBtn = $app.find('.header-button.history-back');
+        const fwdBtn = $app.find('.header-button.history-forward');
+
+        backBtn.toggleClass('history-disabled', this.index <= 0);
+        fwdBtn.toggleClass('history-disabled', this.index >= this.history.length - 1);
+    }
+
     static updateAllButtons() {
-        $('.journal-sheet').each((i, el) => {
-            this.updateButtons($(el));
-        });
+        for (const app of Object.values(ui.windows)) {
+            if (app instanceof JournalSheet) {
+                this.updateButtons(app);
+            }
+        }
     }
 }
 
-// Hook into initial Foundry load
 Hooks.once('init', () => {
     JournalHistory.init();
 });
 
-// Hook into Journal Renders
+// Preferred, documented mechanism.
+Hooks.on('getJournalSheetHeaderButtons', (app, buttons) => {
+    JournalHistory.addHeaderButtons(app, buttons);
+});
+
+// Track page visits, and make sure the buttons exist + reflect current state
+// every time a journal sheet renders (covers the fallback path too).
 Hooks.on('renderJournalSheet', (app, html, data) => {
     const $html = $(html);
-    
-    // Retrieve the active page directly from the sheet state or DOM 
+
     const activeToc = $html.find('.directory-item.active');
     let pageId = activeToc.data('page-id');
-    
-    // Fallback: If no page is specifically active in the DOM, grab the first page
+
     if (!pageId && app.object.pages.size > 0) {
         pageId = app.object.pages.contents[0].id;
     }
@@ -154,5 +191,6 @@ Hooks.on('renderJournalSheet', (app, html, data) => {
         }
     }
 
-    JournalHistory.injectButtons(app, $html);
+    JournalHistory.ensureFallbackButtons(app);
+    JournalHistory.updateButtons(app);
 });
