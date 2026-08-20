@@ -1,0 +1,30 @@
+.journal-history-controls {
+    display: flex;
+    gap: 0.25rem;
+    margin-right: 0.5rem;
+    align-items: center;
+}
+
+.journal-history-controls .history-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 6px;
+    height: 24px;
+    background: rgba(0, 0, 0, 0.1);
+    border: 1px solid var(--color-border-dark-1);
+    border-radius: 3px;
+    color: var(--color-text-light-highlight);
+    cursor: pointer;
+}
+
+.journal-history-controls .history-btn:hover {
+    background: rgba(0, 0, 0, 0.3);
+    box-shadow: 0 0 5px var(--color-shadow-primary);
+}
+
+.journal-history-controls .history-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    box-shadow: none;
+}
